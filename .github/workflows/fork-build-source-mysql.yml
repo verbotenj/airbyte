@@ -6,16 +6,20 @@ name: Fork Build - source-mysql
 # a fork. It mirrors the image build performed by `connector-image-build.yml`, but pushes to the
 # fork owner's GHCR namespace.
 #
-# This file is intentionally confined to the `build/*` branch and must not be part of the upstream
-# pull request.
+# This file is intentionally confined to the fork's `fork-main` branch and must not be part of
+# the upstream pull request.
+#
+# `fork-main` is the fork's release branch: fixes branch off it and merge back into it, and
+# every merge publishes a new image. The `master` branch is left as an untouched mirror of
+# airbytehq/airbyte so that `Sync fork` stays a fast-forward.
 
 on:
   push:
     branches:
-      - "build/**"
+      - fork-main
   pull_request:
     branches:
-      - master
+      - fork-main
   workflow_dispatch:
 
 permissions:
