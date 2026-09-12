@@ -1,0 +1,163 @@
+name: Fork Build - source-mysql
+
+# Airbyte's own connector CI is driven by `connector-ci-checks.yml` and friends, which depend on
+# organisation secrets (Dagger cloud, GCP, DockerHub) that a fork does not have. This workflow is a
+# self-contained stand-in so the MySQL 8.4 tagged-GTID fix can be built, tested and published from
+# a fork. It mirrors the image build performed by `connector-image-build.yml`, but pushes to the
+# fork owner's GHCR namespace.
+#
+# This file is intentionally confined to the `build/*` branch and must not be part of the upstream
+# pull request.
+
+on:
+  push:
+    branches:
+      - "build/**"
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONNECTOR_NAME: source-mysql
+  CONNECTOR_ROOT: airbyte-integrations/connectors/source-mysql
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: zulu
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+        with:
+          add-job-summary: "on-failure"
+          gradle-version: "8.14"
+
+      # The tagged-GTID fix lives in the CDC toolkit (Debezium 3.6.2) and in the connector. Both are
+      # exercised: the toolkit suite guards the CDK change, the connector suite guards the parsing
+      # and the temporal converters, and includes the Testcontainers-based CDC integration tests.
+      - name: Test bulk CDK extract-cdc toolkit
+        run: ./gradlew :airbyte-cdk:bulk:toolkits:bulk-cdk-toolkit-extract-cdc:test
+
+      - name: Test connector
+        run: ./gradlew :airbyte-integrations:connectors:${{ env.CONNECTOR_NAME }}:test
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-reports
+          path: |
+            ${{ env.CONNECTOR_ROOT }}/build/reports/tests/
+            airbyte-cdk/bulk/toolkits/extract-cdc/build/reports/tests/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  image:
+    name: Build and publish image
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: zulu
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+        with:
+          add-job-summary: "on-failure"
+          gradle-version: "8.14"
+
+      - name: Resolve vars
+        id: vars
+        run: |
+          set -euo pipefail
+          REGISTRY="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${CONNECTOR_NAME}"
+          BASE_IMAGE=$(yq -r '.data.connectorBuildOptions.baseImage' "${CONNECTOR_ROOT}/metadata.yaml")
+          VERSION=$(yq -r '.data.dockerImageTag' "${CONNECTOR_ROOT}/metadata.yaml")
+          {
+            echo "base-image=${BASE_IMAGE}"
+            echo "version-tag=${REGISTRY}:${VERSION}"
+            echo "sha-tag=${REGISTRY}:sha-${GITHUB_SHA::12}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Build connector tarball
+        run: ./gradlew :airbyte-integrations:connectors:${{ env.CONNECTOR_NAME }}:distTar
+
+      - name: Log in to GHCR
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      # A pull request build is not published: the image is loaded into the local daemon so the
+      # smoke test below still runs against exactly what would have been pushed.
+      - name: Build connector image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: ${{ env.CONNECTOR_ROOT }}
+          file: docker-images/Dockerfile.java-connector
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          tags: |
+            ${{ steps.vars.outputs.version-tag }}
+            ${{ steps.vars.outputs.sha-tag }}
+          build-args: |
+            BASE_IMAGE=${{ steps.vars.outputs.base-image }}
+            CONNECTOR_NAME=${{ env.CONNECTOR_NAME }}
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.vars.outputs.sha-tag }}'
+          docker run --rm --platform linux/amd64 "$IMAGE" spec | tee spec.out
+          jq -e 'select(.type == "SPEC") | .spec.connectionSpecification.title' < spec.out
+
+      - name: Summary
+        env:
+          VERSION_TAG: ${{ steps.vars.outputs.version-tag }}
+          SHA_TAG: ${{ steps.vars.outputs.sha-tag }}
+          PUBLISHED: ${{ github.event_name != 'pull_request' }}
+        run: |
+          {
+            echo "### source-mysql image"
+            echo
+            echo "- \`${VERSION_TAG}\`"
+            echo "- \`${SHA_TAG}\`"
+            echo
+            echo "Published: ${PUBLISHED}"
+          } >> "$GITHUB_STEP_SUMMARY"
