@@ -25,7 +25,7 @@ requests = "^2.32.3"
 source-couchbase = "source_couchbase.run:run"
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^8.3.3"
+pytest = ">=8.3.3,<10.0.0"
 requests-mock = "^1.9.3"
 pytest-mock = "^3.6.1"
 pendulum = "==2.1.2"
