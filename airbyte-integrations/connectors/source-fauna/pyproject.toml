@@ -25,7 +25,7 @@ source-fauna = "source_fauna.run:run"
 
 [tool.poetry.group.dev.dependencies]
 requests-mock = "^1.9.3"
-pytest = "^8.3.3"
+pytest = "^8.4.2"
 freezegun = "^1.4.0"
 pytest-mock = "^3.6.1"
 docker = "^7.0.0"
