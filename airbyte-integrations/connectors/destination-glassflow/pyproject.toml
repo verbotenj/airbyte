@@ -24,5 +24,5 @@ glassflow = ">=2.1.0"
 destination-glassflow = "destination_glassflow.run:run"
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^8.3.2"
+pytest = ">=8.3.2,<10.0.0"
 
